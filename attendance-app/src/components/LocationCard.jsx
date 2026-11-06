@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAttendance, setGeoStatus, notifyAdminOutOfRange } from "../store/attendanceStore";
 import { checkGeofence, getCurrentCoords } from "../utils/geofence";
 
 export default function LocationCard() {
-  const { offices, geoStatus } = useAttendance();
+  const { offices, geoStatus, activeSession } = useAttendance();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [adminNotified, setAdminNotified] = useState(false);
 
+  const clockedIn = !!activeSession;
+  const officesRef = useRef(offices);
+  officesRef.current = offices;
+  const wasInside = useRef(true);
+
+  // Manual / on-load check
   const verify = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -41,6 +47,37 @@ export default function LocationCard() {
 
   useEffect(() => { verify(); }, [verify]);
 
+  // Live tracking: while clocked in, alert the admin the moment the employee leaves the radius.
+  useEffect(() => {
+    if (!clockedIn || !("geolocation" in navigator)) return;
+    wasInside.current = true;
+
+    const id = navigator.geolocation.watchPosition(
+      (pos) => {
+        const result = checkGeofence(pos.coords.latitude, pos.coords.longitude, officesRef.current);
+        if (!result) return;
+        setGeoStatus({
+          verified: result.verified,
+          branch: result.office.name,
+          wifi: result.office.wifi,
+          distanceKm: result.distanceKm,
+          radiusKm: result.radiusKm,
+        });
+        if (!result.verified && wasInside.current) {
+          notifyAdminOutOfRange({
+            office: result.office,
+            distanceKm: result.distanceKm,
+            radiusKm: result.radiusKm,
+          });
+        }
+        wasInside.current = result.verified;
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 10000 }
+    );
+    return () => navigator.geolocation.clearWatch(id);
+  }, [clockedIn]);
+
   const ok = geoStatus?.verified;
 
   return (
@@ -57,6 +94,10 @@ export default function LocationCard() {
           </span>
         )}
       </div>
+
+      {clockedIn && (
+        <p className="mt-2 text-xs text-emerald-300">Live tracking is on while you are clocked in.</p>
+      )}
 
       {loading && <p className="mt-4 text-sm text-blue-300">Checking your location…</p>}
       {error && <p role="alert" className="mt-4 text-sm text-red-300">{error}</p>}
@@ -85,7 +126,7 @@ export default function LocationCard() {
       {geoStatus && !ok && !loading && (
         <p role="alert" className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
           You are {geoStatus.distanceKm.toFixed(2)} km from {geoStatus.branch}, beyond the {geoStatus.radiusKm.toFixed(1)} km limit.
-          {adminNotified ? " The office admin has been alerted." : " The office admin was already alerted."}
+          {" The office admin has been alerted."}
         </p>
       )}
 
